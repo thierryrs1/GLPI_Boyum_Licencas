@@ -25,8 +25,23 @@ node app.js 0090500996
 node app.js HELIANTO
 ```
 
-### 4. Abrir chamados automaticamente no GLPI e notificar no Teams para licenças vencendo:
+### 4. Abrir chamados automaticamente no GLPI para licenças vencendo (somente `Auto-Renewal: Não`):
+*(O envio ao Teams está desativado por padrão via `ENVIAR_TEAMS_ATIVO = false` em `app.js`)*
+
+Parâmetros configurados na abertura do chamado no GLPI:
+- **Entidade:** `SPS Group > Atendimento externo` (ID `1`)
+- **Tipo:** `Incidente` (`1`)
+- **Categoria:** `Manufatura > Beas > Produção` (ID `126`)
+- **Origem da Requisição:** `IA` (ID `8`)
+- **Requerente:** `thierry.silva@spsgroup.com.br` (ID `2545`)
+- **Grupo Atribuído:** `SPS > Manufatura` (ID `6`)
+- **Itens:** `Appliance > Beas` (ID `5`)
+
 ```bash
+# Criar apenas 1 chamado de teste (apenas licenças sem Auto-Renewal):
+node app.js --beas --dias=45 --teste-chamado
+
+# Criar para todas as licenças BEAS (sem Auto-Renewal) vencendo em até 30 dias:
 node app.js --beas --dias=30 --criar-chamado
 ```
 

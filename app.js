@@ -37,6 +37,20 @@ const BOYUM_USER = env.BOYUM_USER || env.CLIENT_USER;
 const BOYUM_PASS = env.BOYUM_PASS;
 const BOYUM_PORTAL_URL = 'https://portal.boyum-it.com';
 
+// Parâmetros fixos mapeados no GLPI da SPS Group
+const GLPI_CONFIG = {
+    TYPE_INCIDENTE: 1, // 1 = Incidente
+    CATEGORY_BEAS_PRODUCAO: 126, // Manufatura > Beas > Produção
+    REQUEST_TYPE_IA: 8, // IA
+    USER_REQUESTER_THIERRY: 2545, // thierry.silva@spsgroup.com.br
+    GROUP_SPS_MANUFATURA: 6, // SPS > Manufatura
+    APPLIANCE_BEAS_ID: 5, // Appliance > Beas
+    ENTITY_ATENDIMENTO_EXTERNO: 1 // SPS Group > Atendimento externo
+};
+
+// Flag para manter envio ao Teams desativado por padrão
+const ENVIAR_TEAMS_ATIVO = false;
+
 /**
  * Função utilitária para requisições HTTPS nativas com suporte a Cookies
  */
@@ -106,7 +120,6 @@ async function loginPortalBoyum() {
         throw new Error('Credenciais BOYUM_USER / BOYUM_PASS não configuradas no .env');
     }
 
-    // 1. GET /Account/Login para obter o __RequestVerificationToken e cookies iniciais
     const getLogin = await request(`${BOYUM_PORTAL_URL}/Account/Login`, {
         method: 'GET',
         headers: {
@@ -129,7 +142,6 @@ async function loginPortalBoyum() {
         returnUrl: '/PartnerEndCustomer'
     });
 
-    // 2. POST /Account/LogIn
     const postLogin = await request(`${BOYUM_PORTAL_URL}/Account/LogIn`, {
         method: 'POST',
         headers: {
@@ -257,7 +269,14 @@ async function killGlpiSession(sessionToken) {
 }
 
 /**
- * Cria um chamado de renovação de licença no GLPI
+ * Cria um chamado de renovação de licença no GLPI com todos os parâmetros solicitados:
+ * - Tipo: Incidente (1)
+ * - Categoria: Manufatura > Beas > Produção (126)
+ * - Origem da requisição: IA (8)
+ * - Requerente: Thierry Silva (2545)
+ * - Atribuído: SPS > Manufatura (6)
+ * - Itens: Appliance > Beas (5)
+ * - Entidade: SPS Group > Atendimento externo (1)
  */
 async function criarChamadoRenovacaoBeas(dadosLicenca) {
     const sessionToken = await initGlpiSession();
@@ -274,43 +293,90 @@ async function criarChamadoRenovacaoBeas(dadosLicenca) {
             `<p><strong>Auto-Renewal no Portal:</strong> ${dadosLicenca.autoRenewal ? 'Sim' : 'Não'}</p>`
         ].join('\n');
 
+        const headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Content-Type': 'application/json',
+            'Session-Token': sessionToken,
+            'App-Token': APP_TOKEN
+        };
+
         const payload = {
             input: {
                 name: titulo,
                 content: descricao,
-                status: 1, // Novo
+                entities_id: GLPI_CONFIG.ENTITY_ATENDIMENTO_EXTERNO,
+                type: GLPI_CONFIG.TYPE_INCIDENTE,
+                itilcategories_id: GLPI_CONFIG.CATEGORY_BEAS_PRODUCAO,
+                requesttypes_id: GLPI_CONFIG.REQUEST_TYPE_IA,
+                status: 2, // Em atendimento (atribuído)
                 urgency: 4, // Alta
                 impact: 4,
                 priority: 4,
-                type: 2 // Requisição
+                _users_id_requester: GLPI_CONFIG.USER_REQUESTER_THIERRY,
+                _groups_id_assign: GLPI_CONFIG.GROUP_SPS_MANUFATURA
             }
         };
 
         const res = await request(`${BASE_URL_GLPI}/Ticket`, {
             method: 'POST',
-            headers: {
-                'User-Agent': 'Mozilla/5.0',
-                'Content-Type': 'application/json',
-                'Session-Token': sessionToken,
-                'App-Token': APP_TOKEN
-            }
+            headers
         }, payload);
 
         if (res.status < 200 || res.status >= 300) {
             throw new Error(`Erro ao criar chamado no GLPI (HTTP ${res.status}): ${res.raw}`);
         }
 
-        return res.data;
+        const ticketCriado = res.data;
+
+        if (ticketCriado && ticketCriado.id) {
+            // 1. Garante vínculo de Requerente (Ticket_User type=1)
+            await request(`${BASE_URL_GLPI}/Ticket_User`, {
+                method: 'POST',
+                headers
+            }, {
+                input: {
+                    tickets_id: ticketCriado.id,
+                    users_id: GLPI_CONFIG.USER_REQUESTER_THIERRY,
+                    type: 1 // 1 = Requerente
+                }
+            });
+
+            // 2. Garante vínculo do Grupo Atribuído: SPS > Manufatura (Group_Ticket type=2)
+            await request(`${BASE_URL_GLPI}/Group_Ticket`, {
+                method: 'POST',
+                headers
+            }, {
+                input: {
+                    tickets_id: ticketCriado.id,
+                    groups_id: GLPI_CONFIG.GROUP_SPS_MANUFATURA,
+                    type: 2 // 2 = Atribuído
+                }
+            });
+
+            // 3. Vincula o Item: Appliance > Beas (Item_Ticket)
+            await request(`${BASE_URL_GLPI}/Item_Ticket`, {
+                method: 'POST',
+                headers
+            }, {
+                input: {
+                    tickets_id: ticketCriado.id,
+                    itemtype: 'Appliance',
+                    items_id: GLPI_CONFIG.APPLIANCE_BEAS_ID
+                }
+            });
+        }
+
+        return ticketCriado;
     } finally {
         await killGlpiSession(sessionToken);
     }
 }
 
 /**
- * Envia notificação para o Webhook do Microsoft Teams
+ * Envia notificação para o Webhook do Microsoft Teams (Atualmente desativado conforme solicitado)
  */
 async function notificarTeams(dadosLicenca, ticketId = 'Simulação') {
-    if (!WEBHOOK_TEAMS) return;
+    if (!ENVIAR_TEAMS_ATIVO || !WEBHOOK_TEAMS) return;
 
     const payload = {
         type: 'message',
@@ -352,13 +418,15 @@ async function notificarTeams(dadosLicenca, ticketId = 'Simulação') {
 }
 
 /**
- * Executa a varredura no Portal da Boyum, exibe o relatório e opcionalmente cria os chamados no GLPI
+ * Executa a varredura no Portal da Boyum, filtra apenas AutoRenewal = false ("Não"),
+ * exibe o relatório e opcionalmente cria os chamados no GLPI
  */
 async function executarMonitoramentoPortalBeas(opcoes = {}) {
     const {
         filtro = '',
-        diasAlerta = 30,
+        diasAlerta = 45,
         abrirChamados = false,
+        apenasUmTeste = false,
         apenasBeas = false
     } = opcoes;
 
@@ -369,16 +437,19 @@ async function executarMonitoramentoPortalBeas(opcoes = {}) {
         licencas = licencas.filter((l) => l.produto.toLowerCase().includes('beas'));
     }
 
+    // Filtra apenas licenças com Auto-Renewal = Não (false), pois "Sim" renova sozinho e não precisa abrir chamado
+    const semAutoRenewal = licencas.filter((l) => !l.autoRenewal);
+
     // Ordena pelas que vencem mais cedo
-    licencas.sort((a, b) => (a.diasRestantes ?? 99999) - (b.diasRestantes ?? 99999));
+    semAutoRenewal.sort((a, b) => (a.diasRestantes ?? 99999) - (b.diasRestantes ?? 99999));
 
-    console.log(`Total de licenças encontradas: ${licencas.length}\n`);
+    const vencendo = semAutoRenewal.filter((l) => l.diasRestantes !== null && l.diasRestantes <= diasAlerta);
 
-    const vencendo = licencas.filter((l) => l.diasRestantes !== null && l.diasRestantes <= diasAlerta);
+    console.log(`Total de licenças consultadas: ${licencas.length} | Sem Auto-Renewal: ${semAutoRenewal.length}`);
 
     if (filtro) {
-        console.log(`=== RESULTADO PARA FILTRO: "${filtro}" ===`);
-        console.table(licencas.map((l) => ({
+        console.log(`\n=== RESULTADO SEM AUTO-RENEWAL PARA FILTRO: "${filtro}" ===`);
+        console.table(semAutoRenewal.map((l) => ({
             Cliente: l.cliente.substring(0, 35),
             Produto: l.produto.substring(0, 35),
             Installation: l.installationNumber.split('_')[0],
@@ -388,7 +459,7 @@ async function executarMonitoramentoPortalBeas(opcoes = {}) {
             AutoRenewal: l.autoRenewal ? 'Sim' : 'Não'
         })));
     } else {
-        console.log(`=== LICENÇAS VENCENDO EM ATÉ ${diasAlerta} DIAS (${vencendo.length} encontradas) ===`);
+        console.log(`\n=== LICENÇAS (AUTO-RENEWAL: NÃO) VENCENDO EM ATÉ ${diasAlerta} DIAS (${vencendo.length} encontradas) ===`);
         console.table(vencendo.map((l) => ({
             Cliente: l.cliente.substring(0, 35),
             Produto: l.produto.substring(0, 35),
@@ -401,18 +472,20 @@ async function executarMonitoramentoPortalBeas(opcoes = {}) {
     }
 
     if (abrirChamados && vencendo.length > 0) {
-        for (const lic of vencendo) {
+        const listaParaAbrir = apenasUmTeste ? vencendo.slice(0, 1) : vencendo;
+        for (const lic of listaParaAbrir) {
             console.log(`Abrindo chamado no GLPI para: ${lic.cliente} - ${lic.produto} (Vence em ${lic.dataVencimento})...`);
             const ticket = await criarChamadoRenovacaoBeas(lic);
-            console.log(` -> Chamado GLPI criado! ID: #${ticket.id}`);
+            console.log(` -> Chamado GLPI criado com sucesso! ID: #${ticket.id}`);
             await notificarTeams(lic, ticket.id);
         }
     }
 
-    return { total: licencas.length, vencendo, licencas };
+    return { total: licencas.length, semAutoRenewal: semAutoRenewal.length, vencendo };
 }
 
 module.exports = {
+    GLPI_CONFIG,
     loginPortalBoyum,
     obterLicencasPortalBoyum,
     initGlpiSession,
@@ -426,13 +499,15 @@ if (require.main === module) {
     const filtroArg = args.find((a) => !a.startsWith('--')) || '';
     const diasArg = args.find((a) => a.startsWith('--dias='));
     const diasAlerta = diasArg ? parseInt(diasArg.split('=')[1], 10) : 45;
-    const abrirChamados = args.includes('--criar-chamado');
+    const abrirChamados = args.includes('--criar-chamado') || args.includes('--teste-chamado');
+    const apenasUmTeste = args.includes('--teste-chamado');
     const apenasBeas = args.includes('--beas');
 
     executarMonitoramentoPortalBeas({
         filtro: filtroArg,
         diasAlerta,
         abrirChamados,
+        apenasUmTeste,
         apenasBeas
     }).catch((err) => {
         console.error('Erro na execução:', err.message);
