@@ -1,0 +1,59 @@
+// ============================================================================
+// BEASSCRIPT (.src): Extração Automática em Background da Data de Vencimento
+// Campo identificado na tela system_lic_main.psr: dw_2.item.todate.value
+// Pasta de Projeto do Servidor: \\gmegsap\B1_SHR\beas_project\GMEG
+// ============================================================================
+
+global function check_and_export_license
+    // 1. Trava diária: evita rodar mais de 1 vez no mesmo dia
+    sql= select count(*) into :ll_ja_rodou from "BEAS_SYS_SETUP" where "VARIABLE_ID" = 'license_exp_last_sync' and "INHALT" = '<today,yyyymmdd>'
+    if <ll_ja_rodou> > 0 then
+        return success
+    end if
+
+    // 2. Abre a janela de licenças em modo invisível para carregar a dw_2 na memória
+    openwindow=system_lic_main.psr?invisible=true
+
+    // 3. Captura a data de vencimento exata do campo dw_2.item.todate.value
+    // Caso a dw_2 tenha múltiplas linhas de módulos, lê da linha 1 (ou percorre)
+    setvar=ls_validade=<form.dw_2.item.todate.value>
+    if <ls_validade> = "" then
+        setvar=ls_validade=<dw_2.item.todate.value:1>
+    end if
+
+    // 4. Fecha imediatamente a janela invisível
+    closewindow=system_lic_main.psr
+
+    // 5. Grava a data limpa na tabela BEAS_SYS_SETUP (VARIABLE_ID = 'license_expiration_date')
+    if <ls_validade> <> "" then
+        sql= select count(*) into :ll_count from "BEAS_SYS_SETUP" where "VARIABLE_ID" = 'license_expiration_date'
+        if <ll_count> = 0 then
+            sql= insert into "BEAS_SYS_SETUP" ("VARIABLE_ID", "INHALT", "ANDTSTAMP", "ANDUSER") values ('license_expiration_date', '<ls_validade>', current_timestamp, 'beasService2')
+        else
+            sql= update "BEAS_SYS_SETUP" set "INHALT" = '<ls_validade>', "ANDTSTAMP" = current_timestamp, "ANDUSER" = 'beasService2' where "VARIABLE_ID" = 'license_expiration_date'
+        end if
+
+        // Atualiza a trava diária
+        sql= select count(*) into :ll_sync from "BEAS_SYS_SETUP" where "VARIABLE_ID" = 'license_exp_last_sync'
+        if <ll_sync> = 0 then
+            sql= insert into "BEAS_SYS_SETUP" ("VARIABLE_ID", "INHALT", "ANDTSTAMP", "ANDUSER") values ('license_exp_last_sync', '<today,yyyymmdd>', current_timestamp, 'beasService2')
+        else
+            sql= update "BEAS_SYS_SETUP" set "INHALT" = '<today,yyyymmdd>', "ANDTSTAMP" = current_timestamp where "VARIABLE_ID" = 'license_exp_last_sync'
+        end if
+    end if
+end global
+
+// ============================================================================
+// Caso também queira deixar no evento da própria janela (system_lic_main.psr):
+// ============================================================================
+global function dw_2_retrieveend
+    setvar=ls_validade=<dw_2.item.todate.value>
+    if <ls_validade> <> "" then
+        sql= select count(*) into :ll_count from "BEAS_SYS_SETUP" where "VARIABLE_ID" = 'license_expiration_date'
+        if <ll_count> = 0 then
+            sql= insert into "BEAS_SYS_SETUP" ("VARIABLE_ID", "INHALT", "ANDTSTAMP", "ANDUSER") values ('license_expiration_date', '<ls_validade>', current_timestamp, '<currentuser>')
+        else
+            sql= update "BEAS_SYS_SETUP" set "INHALT" = '<ls_validade>', "ANDTSTAMP" = current_timestamp, "ANDUSER" = '<currentuser>' where "VARIABLE_ID" = 'license_expiration_date'
+        end if
+    end if
+end global

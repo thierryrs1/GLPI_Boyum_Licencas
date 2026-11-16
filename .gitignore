@@ -1,0 +1,13 @@
+# Dependências
+node_modules/
+venv/
+__pycache__/
+*.pyc
+
+# Ambiente e segredos
+.env
+*.env.local
+
+# Logs e relatórios temporários
+*.log
+
